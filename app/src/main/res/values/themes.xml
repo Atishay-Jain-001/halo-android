@@ -1,0 +1,7 @@
+<resources>
+    <style name="AppTheme" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowBackground">@color/halo_bg</item>
+        <item name="android:statusBarColor">@color/halo_bg</item>
+        <item name="android:navigationBarColor">@color/halo_bg</item>
+    </style>
+</resources>
