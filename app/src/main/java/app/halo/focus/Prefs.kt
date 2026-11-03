@@ -2,11 +2,19 @@ package app.halo.focus
 
 import android.content.Context
 import android.content.SharedPreferences
+import java.net.URI
 
-/** Everything the app remembers lives here, on the phone only. No secrets. */
+/**
+ * Everything the app remembers lives here, on the phone only.
+ * The "link key" is the one sensitive value: it is NOT a login. It can only ask the server one question
+ * ("is a focus session running on my account?") and it can be revoked by logging out of Halo.
+ */
 object Prefs {
     const val ORIGIN = "https://jeegrinder1.netlify.app"
-    private const val STALE_MS = 130_000L   // if the Halo page stops reporting for this long, the session counts as over
+    private const val STALE_MS = 130_000L                    // old way (page tells the app about another device): only used while the app is NOT linked
+    private const val LOCAL_MAX_MS = 12L * 3_600_000L        // a session started on this phone never lasts longer than the Halo timer's own 12 h limit
+    private const val SERVER_KEEP_MS = 10L * 60_000L         // can't reach the server? keep trusting the last "a session is running" answer this long (so airplane mode is no way around the block)
+    private const val DAY_MS = 26L * 3_600_000L
 
     private fun sp(c: Context): SharedPreferences = c.getSharedPreferences("halo", Context.MODE_PRIVATE)
 
@@ -19,18 +27,103 @@ object Prefs {
     fun onboarded(c: Context) = sp(c).getBoolean("onboarded", false)
     fun setOnboarded(c: Context) = sp(c).edit().putBoolean("onboarded", true).apply()
 
-    /** src is "local" (this phone's timer) or "remote" (a session running on another device). */
-    fun setSession(c: Context, src: String, on: Boolean) {
+    /**
+     * src is "local" (this phone's own timer) or "remote" (old page-based flag for a session on another device).
+     * until (local only): when a Pomodoro focus phase ends, in ms since 1970 (0 = open-ended). It lets the app stop blocking
+     * on time even while the Halo page is asleep.
+     */
+    fun setSession(c: Context, src: String, on: Boolean, until: Long = 0L) {
         val k = if (src == "remote") "remote" else "local"
-        sp(c).edit().putBoolean(k + "_on", on).putLong(k + "_ts", System.currentTimeMillis()).apply()
+        val now = System.currentTimeMillis()
+        val e = sp(c).edit().putBoolean(k + "_on", on).putLong(k + "_ts", now)
+        if (k == "local") {
+            val u = if (on && until > 0L && until < now + DAY_MS) until else 0L
+            e.putLong("local_until", u)
+        }
+        e.apply()
     }
 
-    private fun live(c: Context, k: String): Boolean {
+    fun setLocalOff(c: Context) {
+        sp(c).edit().putBoolean("local_on", false).putLong("local_until", 0L).putLong("local_ts", System.currentTimeMillis()).apply()
+    }
+
+    /** A focus session started on THIS phone is running (and has not run past its known end). */
+    fun localLive(c: Context): Boolean {
         val p = sp(c)
-        return p.getBoolean(k + "_on", false) && System.currentTimeMillis() - p.getLong(k + "_ts", 0L) < STALE_MS
+        val now = System.currentTimeMillis()
+        if (!p.getBoolean("local_on", false)) return false
+        if (now - p.getLong("local_ts", 0L) > LOCAL_MAX_MS) return false
+        val until = p.getLong("local_until", 0L)
+        return until == 0L || now < until
     }
 
-    fun sessionActive(c: Context) = live(c, "local") || live(c, "remote")
+    /** How long since the Halo page last said anything about this phone's session. */
+    fun localSilentMs(c: Context): Long = System.currentTimeMillis() - sp(c).getLong("local_ts", 0L)
+
+    private fun remoteFlagLive(c: Context): Boolean {
+        val p = sp(c)
+        return p.getBoolean("remote_on", false) && System.currentTimeMillis() - p.getLong("remote_ts", 0L) < STALE_MS
+    }
+
+    /* ---- the link to the server (set by the Halo page after login) ---- */
+    class Link(val key: String, val url: String, val anon: String, val device: String)
+
+    fun link(c: Context): Link? {
+        val p = sp(c)
+        val k = p.getString("link_key", null) ?: return null
+        val u = p.getString("link_url", null) ?: return null
+        val a = p.getString("link_anon", null) ?: return null
+        val d = p.getString("link_device", null) ?: return null
+        if (k.isEmpty() || u.isEmpty() || a.isEmpty()) return null
+        return Link(k, u, a, d)
+    }
+
+    fun linked(c: Context) = link(c) != null
+    fun linkUid(c: Context): String = sp(c).getString("link_uid", "") ?: ""
+    fun linkDevice(c: Context): String = sp(c).getString("link_device", "") ?: ""
+
+    /** Only a real https Supabase address is accepted, so the key can never be sent anywhere else. */
+    private fun goodUrl(url: String): Boolean {
+        return try {
+            val u = URI(url)
+            u.scheme == "https" && u.userInfo == null && u.query == null && u.fragment == null &&
+                (u.port == -1 || u.port == 443) && (u.host ?: "").endsWith(".supabase.co") &&
+                (u.path ?: "").let { it.isEmpty() || it == "/" }
+        } catch (e: Exception) { false }
+    }
+
+    fun setLink(c: Context, key: String, url: String, anon: String, device: String, uid: String): Boolean {
+        if (key.length < 32 || key.length > 200) return false
+        if (!goodUrl(url)) return false
+        if (anon.length < 20 || anon.length > 800) return false
+        if (device.length < 8 || device.length > 60 || uid.length > 80) return false
+        sp(c).edit().putString("link_key", key).putString("link_url", url.trimEnd('/')).putString("link_anon", anon)
+            .putString("link_device", device).putString("link_uid", uid)
+            .putBoolean("srv_live", false).putString("srv_dev", "").putLong("srv_ts", 0L).apply()
+        return true
+    }
+
+    /** Log-out (or a revoked key): forget the key and stop treating anything as running. */
+    fun clearLink(c: Context) {
+        sp(c).edit().remove("link_key").remove("link_url").remove("link_anon").remove("link_device").remove("link_uid")
+            .putBoolean("srv_live", false).putString("srv_dev", "").putLong("srv_ts", 0L)
+            .putBoolean("local_on", false).putLong("local_until", 0L).putBoolean("remote_on", false).apply()
+    }
+
+    /** The server's latest answer to "is a focus session running on my account?". device = which device owns it. */
+    fun setServer(c: Context, live: Boolean, device: String) {
+        sp(c).edit().putBoolean("srv_live", live).putString("srv_dev", device).putLong("srv_ts", System.currentTimeMillis()).apply()
+    }
+
+    private fun serverLive(c: Context): Boolean {
+        val p = sp(c)
+        if (!p.getBoolean("srv_live", false)) return false
+        if (System.currentTimeMillis() - p.getLong("srv_ts", 0L) > SERVER_KEEP_MS) return false
+        val owner = p.getString("srv_dev", "") ?: ""
+        return owner.isEmpty() || owner != linkDevice(c)      // a session owned by this phone's own Halo page is covered by the "local" flag
+    }
+
+    fun sessionActive(c: Context): Boolean = localLive(c) || (if (linked(c)) serverLive(c) else remoteFlagLive(c))
 
     /** Blocking is wanted at all (switch on and at least one app chosen). */
     fun blockingWanted(c: Context) = enabled(c) && blocked(c).isNotEmpty()

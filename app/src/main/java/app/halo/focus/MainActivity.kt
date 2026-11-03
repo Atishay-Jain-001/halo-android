@@ -101,8 +101,18 @@ class MainActivity : Activity() {
                 pushState()
             }
             "session" -> {
-                Prefs.setSession(this, o.optString("src"), o.optBoolean("on", false))
+                Prefs.setSession(this, o.optString("src"), o.optBoolean("on", false), o.optLong("until", 0L))
                 if (resumed) BlockerService.ensure(this)
+            }
+            "link" -> {
+                // The page hands over a "link key" (not a login): it lets the blocker ask the server about a running session by itself, even when Halo is closed.
+                val ok = Prefs.setLink(this, o.optString("key"), o.optString("url"), o.optString("anon"), o.optString("device"), o.optString("uid"))
+                if (ok && resumed) BlockerService.ensure(this)
+                pushState()
+            }
+            "unlink" -> {
+                Prefs.clearLink(this)      // logged out of Halo
+                pushState()
             }
             "perms" -> startActivity(Intent(this, SetupActivity::class.java))
             "battery" -> startActivity(Intent(this, SetupActivity::class.java).putExtra("battery", true))
@@ -115,6 +125,9 @@ class MainActivity : Activity() {
         o.put("enabled", Prefs.enabled(this))
         o.put("blocked", JSONArray(Prefs.blocked(this).toList()))
         o.put("perms", JSONObject().put("overlay", Perms.overlay(this)).put("usage", Perms.usage(this)))
+        o.put("linked", Prefs.linked(this))
+        o.put("linkUid", Prefs.linkUid(this))
+        o.put("linkDevice", Prefs.linkDevice(this))
         post(o)
     }
 

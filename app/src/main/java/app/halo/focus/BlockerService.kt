@@ -7,8 +7,10 @@ import android.app.PendingIntent
 import android.app.Service
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.graphics.PixelFormat
@@ -18,6 +20,8 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
+import android.os.SystemClock
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -27,28 +31,52 @@ import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Runs as a foreground service (you see its small notification). While a focus session is active it checks which app is
  * in front, and if it is one you chose, covers it with the "Stay focused" screen.
+ *
+ * It asks the Halo server by itself (every ~12 s while the screen is on) whether a focus session is running on any of your
+ * devices, so blocking works even when the Halo page is asleep or Halo is not open at all.
  */
 class BlockerService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private var overlay: View? = null
     private var overlayPkg: String? = null
-    private var cur: String? = null
+
+    /** Which screens are on top right now: "package/activity" -> when it came to the front. An entry is removed only when that screen is really left. */
+    private val resumed = HashMap<String, Long>()
+
+    /** package -> when the person tapped one of the two buttons on the cover (so it does not pop straight back while Android catches up). */
+    private val dismissed = HashMap<String, Long>()
     private var lastCheck = 0L
     private var lastNote = ""
     private var started = false
+    private var screenOn = true
+    private var lastPoll = -100_000L
+    private var lastTouch = -100_000L
+    private val netBusy = AtomicBoolean(false)
+    private var io: ExecutorService? = null
+    private var screenReceiver: BroadcastReceiver? = null
 
     private val tick = object : Runnable {
         override fun run() {
-            try { doTick() } catch (e: Exception) { /* never crash the blocker */ }
-            handler.postDelayed(this, if (Prefs.sessionActive(this@BlockerService)) 1000L else 4000L)
+            var next = 4000L
+            try { next = doTick() } catch (e: Exception) { /* never crash the blocker */ }
+            handler.postDelayed(this, next)
         }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        io = Executors.newSingleThreadExecutor()
+        registerScreenReceiver()
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         makeChannel()
@@ -69,38 +97,130 @@ class BlockerService : Service() {
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
         hideOverlay()
+        try { screenReceiver?.let { unregisterReceiver(it) } } catch (e: Exception) {}
+        screenReceiver = null
+        try { io?.shutdownNow() } catch (e: Exception) {}
         started = false
         super.onDestroy()
     }
 
-    private fun doTick() {
-        if (!Prefs.blockingWanted(this)) { stopSelf(); return }
-        if (!Perms.both(this)) {
-            note("Halo needs permissions to block apps. Tap to fix.")
-            hideOverlay(); return
-        }
-        if (!Prefs.sessionActive(this)) {
-            note("Halo is ready to protect your focus")
-            hideOverlay(); cur = null; lastCheck = 0L; return
-        }
-        note("Focus session running. Chosen apps are blocked.")
-        val front = detectForeground()
-        if (front != null && front != packageName && Prefs.blocked(this).contains(front)) showOverlay(front) else hideOverlay()
+    private fun registerScreenReceiver() {
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            screenOn = pm.isInteractive
+            val r = object : BroadcastReceiver() {
+                override fun onReceive(c: Context, i: Intent) {
+                    if (i.action == Intent.ACTION_SCREEN_ON) {
+                        screenOn = true
+                        maybePoll(true)                       // the phone was just picked up: check the server right now
+                        handler.removeCallbacks(tick)
+                        handler.post(tick)
+                    } else if (i.action == Intent.ACTION_SCREEN_OFF) {
+                        screenOn = false
+                    }
+                }
+            }
+            val f = IntentFilter()
+            f.addAction(Intent.ACTION_SCREEN_ON)
+            f.addAction(Intent.ACTION_SCREEN_OFF)
+            ContextCompat.registerReceiver(this, r, f, ContextCompat.RECEIVER_NOT_EXPORTED)
+            screenReceiver = r
+        } catch (e: Exception) { screenOn = true }
     }
 
+    /** Returns how long to wait before the next look. */
+    private fun doTick(): Long {
+        if (!Prefs.blockingWanted(this)) { stopSelf(); return 4000L }
+        if (!Perms.both(this)) {
+            note("Halo needs permissions to block apps. Tap to fix.")
+            hideOverlay(); return 4000L
+        }
+        maybePoll(false)
+        val active = Prefs.sessionActive(this)
+        if (!screenOn) {                       // nobody is looking at the phone: nothing to cover (the picture of open apps is caught up when the screen turns on)
+            hideOverlay()
+            note(if (active) "Focus session running. Chosen apps are blocked." else "Halo is ready to protect your focus")
+            return 4000L
+        }
+        val front = blockedFront()
+        if (!active) {
+            note("Halo is ready to protect your focus")
+            hideOverlay()
+            if (front != null) { maybePoll(true); return 1500L }      // a chosen app was just opened: ask the server straight away, don't wait for the next check
+            return 4000L
+        }
+        note("Focus session running. Chosen apps are blocked.")
+        if (front != null) showOverlay(front) else hideOverlay()
+        return 1000L
+    }
+
+    /**
+     * Which of the chosen apps is on screen right now (or null)?
+     * Not "the last app that came to the front" but "which screens are open and have not been left yet". So half-swiping out of
+     * an app and coming back keeps the cover (or brings it back), and the cover goes only when the app is really left.
+     */
     @Suppress("DEPRECATION")
-    private fun detectForeground(): String? {
+    private fun blockedFront(): String? {
         val usm = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
         val now = System.currentTimeMillis()
-        val from = if (lastCheck == 0L) now - 3_600_000L else lastCheck - 2_000L
+        val from = if (lastCheck == 0L) now - 6 * 3_600_000L else lastCheck - 2_000L
         val ev = usm.queryEvents(from, now)
         val e = UsageEvents.Event()
         while (ev.hasNextEvent()) {
             ev.getNextEvent(e)
-            if (e.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND) cur = e.packageName
+            val p = e.packageName ?: continue
+            val key = p + "/" + (e.className ?: "")
+            when (e.eventType) {
+                1 -> resumed[key] = e.timeStamp                 // screen came to the front (MOVE_TO_FOREGROUND / ACTIVITY_RESUMED)
+                2, 23, 24 -> resumed.remove(key)                // left: paused, stopped or destroyed
+            }
         }
         lastCheck = now
-        return cur
+        val blocked = Prefs.blocked(this)
+        var best: String? = null
+        var bestTs = 0L
+        for ((key, ts) in resumed) {
+            val pkg = key.substringBefore('/')
+            if (pkg == packageName || !blocked.contains(pkg)) continue
+            if (ts <= (dismissed[pkg] ?: 0L)) continue      // the cover was closed with a button after this screen came up
+            if (ts >= bestTs) { best = pkg; bestTs = ts }
+        }
+        return best
+    }
+
+    /** Asks the server (on a background thread) whether a session is running anywhere. force = skip the usual waiting time (but never more than once per 3 s). */
+    private fun maybePoll(force: Boolean) {
+        val link = Prefs.link(this) ?: return
+        val now = SystemClock.elapsedRealtime()
+        val gap = if (force) 3_000L else if (screenOn) 12_000L else 60_000L
+        if (now - lastPoll < gap) return
+        if (!netBusy.compareAndSet(false, true)) return
+        lastPoll = now
+        val touch = Prefs.localLive(this) && now - lastTouch >= 25_000L
+        if (touch) lastTouch = now
+        val ctx = applicationContext
+        val ex = io
+        if (ex == null) { netBusy.set(false); return }
+        try {
+            ex.execute {
+                try {
+                    val st = Net.status(link)
+                    var cleared = false
+                    if (st != null) {
+                        if (!st.linked) { Prefs.clearLink(ctx); cleared = true }      // the key was revoked (logged out elsewhere): forget it; the Halo page will link again
+                        else Prefs.setServer(ctx, st.live, st.device)
+                    }
+                    if (touch && !cleared) {
+                        // This phone's own Halo page may be asleep: keep its session visible to your other devices, and notice if it is really gone.
+                        val ok = Net.touch(link)
+                        if (ok == false && Prefs.localSilentMs(ctx) > 90_000L) Prefs.setLocalOff(ctx)
+                    }
+                } catch (e: Exception) {
+                } finally {
+                    netBusy.set(false)
+                }
+            }
+        } catch (e: Exception) { netBusy.set(false) }
     }
 
     private fun showOverlay(pkg: String) {
@@ -134,10 +254,11 @@ class BlockerService : Service() {
             setOnClickListener { onClick() }
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, (52 * dp).toInt()).apply { topMargin = (14 * dp).toInt() }
         }
-        root.addView(btn("Back to Halo", true) { openHalo() }.also {
+        root.addView(btn("Back to Halo", true) { dismissCover(pkg); openHalo() }.also {
             (it.layoutParams as LinearLayout.LayoutParams).topMargin = (28 * dp).toInt()
         })
         root.addView(btn("Go to home screen", false) {
+            dismissCover(pkg)
             startActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         })
         val lp = WindowManager.LayoutParams(
@@ -151,6 +272,12 @@ class BlockerService : Service() {
             (getSystemService(Context.WINDOW_SERVICE) as WindowManager).addView(root, lp)
             overlay = root; overlayPkg = pkg
         } catch (e: Exception) { overlay = null; overlayPkg = null }
+    }
+
+    /** The person chose to leave: close the cover, and don't bring it back for that app until it is opened again. */
+    private fun dismissCover(pkg: String) {
+        dismissed[pkg] = System.currentTimeMillis()
+        hideOverlay()
     }
 
     private fun hideOverlay() {
@@ -194,7 +321,7 @@ class BlockerService : Service() {
         private const val CHANNEL = "halo_blocker"
         private const val NOTE_ID = 1
 
-        /** Call only while the app is on screen (Android refuses to start it from the background). */
+        /** Call while the app is on screen, or from the boot receiver (Android refuses to start it from the background otherwise). */
         fun ensure(c: Context) {
             if (Prefs.blockingWanted(c) && Perms.both(c)) {
                 try { ContextCompat.startForegroundService(c, Intent(c, BlockerService::class.java)) } catch (e: Exception) {}
