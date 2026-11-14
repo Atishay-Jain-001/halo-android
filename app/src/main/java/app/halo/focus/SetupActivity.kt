@@ -59,6 +59,29 @@ class SetupActivity : Activity() {
         for ((label, fn) in btns) box.addView(button(label, ok != true, fn))
     }
 
+    /** Tries the "auto-start" screens of the common phone makers one by one; falls back to Halo's own app info. */
+    private fun openAutoStart() {
+        val tries = listOf(
+            "com.miui.securitycenter" to "com.miui.permcenter.autostart.AutoStartManagementActivity",
+            "com.coloros.safecenter" to "com.coloros.safecenter.permission.startup.StartupAppListActivity",
+            "com.coloros.safecenter" to "com.coloros.safecenter.startupapp.StartupAppListActivity",
+            "com.oppo.safe" to "com.oppo.safe.permission.startup.StartupAppListActivity",
+            "com.vivo.permissionmanager" to "com.vivo.permissionmanager.activity.BgStartUpManagerActivity",
+            "com.iqoo.secure" to "com.iqoo.secure.ui.phoneoptimize.AddWhiteListActivity",
+            "com.huawei.systemmanager" to "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity",
+            "com.huawei.systemmanager" to "com.huawei.systemmanager.optimize.process.ProtectActivity",
+            "com.oneplus.security" to "com.oneplus.security.chainlaunch.view.ChainLaunchAppListActivity",
+            "com.asus.mobilemanager" to "com.asus.mobilemanager.autostart.AutoStartActivity"
+        )
+        for ((pkg, cls) in tries) {
+            try {
+                startActivity(Intent().setClassName(pkg, cls).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                return
+            } catch (e: Exception) { /* not this phone: try the next one */ }
+        }
+        try { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) } catch (e: Exception) {}
+    }
+
     private fun build() {
         box.removeAllViews()
         box.addView(text("Set up Halo", 28f, "#FFFFFF", true))
@@ -97,6 +120,11 @@ class SetupActivity : Activity() {
                 catch (e: Exception) { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
             })
 
+        step("6", "Auto-start / background switch (many phones)", null,
+            "Xiaomi, Redmi, POCO, Oppo, Realme, Vivo, iQOO, Huawei, Honor, OnePlus and some Samsung phones also have a separate \"auto-start\" or \"background\" switch that decides whether Halo may restart itself. " +
+                "Tap the button: Halo tries to open that screen for your phone. Switch Halo ON there. If your phone has no such screen, Halo's app info opens instead; look for Battery or Auto-start there.",
+            "Open auto-start settings" to { openAutoStart() })
+
         box.addView(text("Phone-specific battery tips", 16f, "#FFFFFF", true, 22))
         box.addView(text(
             "• Samsung: Settings → Battery → Background usage limits → Never sleeping apps → add Halo.\n" +
@@ -108,7 +136,7 @@ class SetupActivity : Activity() {
             14f, "#C9CEE8", false, 6))
 
         box.addView(text("How it works", 16f, "#FFFFFF", true, 22))
-        box.addView(text("Open Halo once after restarting your phone. Then pick your blocked apps in Halo's Focus Timer → settings (⚙) → \"Block distracting apps\". Blocking starts by itself whenever a focus timer is running on this phone or on your laptop.", 14f, "#C9CEE8", false, 6))
+        box.addView(text("You never need to open Halo to start blocking: after the first login, Halo keeps checking on its own (even after you swipe it away or restart the phone) and covers your chosen apps as soon as a focus timer runs on your laptop or phone. Pick your blocked apps in Halo's Focus Timer → settings (⚙) → \"Block distracting apps\". Blocking starts by itself whenever a focus timer is running on this phone or on your laptop.", 14f, "#C9CEE8", false, 6))
 
         box.addView(button("Done") { Prefs.setOnboarded(this); finish() }.also { (it.layoutParams as LinearLayout.LayoutParams).topMargin = (28 * dp).toInt() })
     }

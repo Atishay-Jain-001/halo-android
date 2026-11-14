@@ -115,6 +115,12 @@ object Prefs {
         sp(c).edit().putBoolean("srv_live", live).putString("srv_dev", device).putLong("srv_ts", System.currentTimeMillis()).apply()
     }
 
+    /** How long ago the blocker last got an answer from the server (ms), or -1 if it never has. Shown in Halo's settings card. */
+    fun serverAgeMs(c: Context): Long {
+        val t = sp(c).getLong("srv_ts", 0L)
+        return if (t == 0L) -1L else maxOf(0L, System.currentTimeMillis() - t)
+    }
+
     private fun serverLive(c: Context): Boolean {
         val p = sp(c)
         if (!p.getBoolean("srv_live", false)) return false

@@ -6,6 +6,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.view.ViewGroup
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -124,12 +125,16 @@ class MainActivity : Activity() {
         o.put("t", "state")
         o.put("enabled", Prefs.enabled(this))
         o.put("blocked", JSONArray(Prefs.blocked(this).toList()))
-        o.put("perms", JSONObject().put("overlay", Perms.overlay(this)).put("usage", Perms.usage(this)))
+        o.put("perms", JSONObject().put("overlay", Perms.overlay(this)).put("usage", Perms.usage(this)).put("battery", batteryOk()))
+        o.put("srvAge", Prefs.serverAgeMs(this))
         o.put("linked", Prefs.linked(this))
         o.put("linkUid", Prefs.linkUid(this))
         o.put("linkDevice", Prefs.linkDevice(this))
         post(o)
     }
+
+    private fun batteryOk(): Boolean =
+        try { (getSystemService(POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(packageName) } catch (e: Exception) { true }
 
     private fun sendApps() {
         Thread {

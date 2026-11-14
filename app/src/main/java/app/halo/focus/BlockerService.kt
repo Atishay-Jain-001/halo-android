@@ -16,6 +16,8 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -39,8 +41,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Runs as a foreground service (you see its small notification). While a focus session is active it checks which app is
  * in front, and if it is one you chose, covers it with the "Stay focused" screen.
  *
- * It asks the Halo server by itself (every ~12 s while the screen is on) whether a focus session is running on any of your
- * devices, so blocking works even when the Halo page is asleep or Halo is not open at all.
+ * It asks the Halo server by itself (every ~12 s while the screen is on, and straight away when the screen turns on, when a
+ * chosen app is opened, or when the internet comes back) whether a focus session is running on any of your devices, so
+ * blocking works even when the Halo page is asleep or Halo is not open at all.
+ * If the phone stops this service, Watchdog (alarm + system job) starts it again by itself: no need to open Halo.
  */
 class BlockerService : Service() {
     private val handler = Handler(Looper.getMainLooper())
@@ -61,6 +65,7 @@ class BlockerService : Service() {
     private val netBusy = AtomicBoolean(false)
     private var io: ExecutorService? = null
     private var screenReceiver: BroadcastReceiver? = null
+    private var netCb: ConnectivityManager.NetworkCallback? = null
 
     private val tick = object : Runnable {
         override fun run() {
@@ -91,7 +96,15 @@ class BlockerService : Service() {
             stopSelf(); return START_NOT_STICKY
         }
         if (!started) { started = true; handler.post(tick) }
+        registerNetCallback()
+        Watchdog.schedule(this)
         return START_STICKY
+    }
+
+    /** The person swiped Halo out of the recent-apps list: some phones stop the service with it. Ask the watchdog to bring it back. */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        if (Prefs.blockingWanted(this) && Perms.both(this)) Watchdog.scheduleAlarm(this, 1_500L)
+        super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {
@@ -99,6 +112,10 @@ class BlockerService : Service() {
         hideOverlay()
         try { screenReceiver?.let { unregisterReceiver(it) } } catch (e: Exception) {}
         screenReceiver = null
+        try { netCb?.let { (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(it) } } catch (e: Exception) {}
+        netCb = null
+        // Stopped by the phone (not by the person switching blocking off)? Come back in a moment.
+        if (Prefs.blockingWanted(this) && Perms.both(this)) Watchdog.scheduleAlarm(this, 3_000L)
         try { io?.shutdownNow() } catch (e: Exception) {}
         started = false
         super.onDestroy()
@@ -126,6 +143,19 @@ class BlockerService : Service() {
             ContextCompat.registerReceiver(this, r, f, ContextCompat.RECEIVER_NOT_EXPORTED)
             screenReceiver = r
         } catch (e: Exception) { screenOn = true }
+    }
+
+    /** The internet just came back (or changed from mobile data to Wi-Fi): a session may have started while we were offline, so ask right now. */
+    private fun registerNetCallback() {
+        if (netCb != null) return
+        try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val cb = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) { handler.post { maybePoll(true) } }
+            }
+            cm.registerDefaultNetworkCallback(cb)
+            netCb = cb
+        } catch (e: Exception) { netCb = null }
     }
 
     /** Returns how long to wait before the next look. */
@@ -323,8 +353,10 @@ class BlockerService : Service() {
 
         /** Call while the app is on screen, or from the boot receiver (Android refuses to start it from the background otherwise). */
         fun ensure(c: Context) {
-            if (Prefs.blockingWanted(c) && Perms.both(c)) {
-                try { ContextCompat.startForegroundService(c, Intent(c, BlockerService::class.java)) } catch (e: Exception) {}
+            val ctx = c.applicationContext
+            if (Prefs.blockingWanted(ctx) && Perms.both(ctx)) {
+                Watchdog.schedule(ctx)
+                try { ContextCompat.startForegroundService(ctx, Intent(ctx, BlockerService::class.java)) } catch (e: Exception) {}
             }
         }
     }

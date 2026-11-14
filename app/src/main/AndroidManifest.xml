@@ -54,6 +54,15 @@
             </intent-filter>
         </receiver>
 
+        <receiver
+            android:name=".WatchdogReceiver"
+            android:exported="false" />
+
+        <service
+            android:name=".WatchdogJob"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+
         <service
             android:name=".BlockerService"
             android:exported="false"
