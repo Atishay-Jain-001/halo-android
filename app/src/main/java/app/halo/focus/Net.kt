@@ -8,6 +8,11 @@ import java.net.URL
 object Net {
     class Status(val linked: Boolean, val live: Boolean, val device: String)
 
+    /** The focus session row on the server (any device of this account). elapsed = how much the timer shows as counted, at the moment of the answer. */
+    class Row(val device: String, val label: String, val sn: String, val sc: String, val mode: String, val phase: String,
+              val running: Boolean, val total: Long, val elapsed: Long, val over: Boolean)
+    class StateResult(val linked: Boolean, val row: Row?)
+
     private fun post(link: Prefs.Link, fn: String, body: JSONObject): String? {
         var open: HttpURLConnection? = null
         try {
@@ -38,6 +43,23 @@ object Net {
         return try {
             val o = JSONObject(t)
             Status(o.optBoolean("linked", false), o.optBoolean("live", false), if (o.isNull("device")) "" else o.optString("device", ""))
+        } catch (e: Exception) { null }
+    }
+
+    /** What the floating timer shows when the session runs on ANOTHER device. null = could not reach the server (do not change anything). Needs the SQL "13 android mini timer". */
+    fun state(link: Prefs.Link): StateResult? {
+        val t = post(link, "android_focus_state", JSONObject().put("p_key", link.key)) ?: return null
+        return try {
+            val o = JSONObject(t)
+            if (!o.optBoolean("linked", false)) return StateResult(false, null)
+            val r = o.optJSONObject("row") ?: return StateResult(true, null)
+            StateResult(true, Row(
+                r.optString("device", ""), if (r.isNull("label")) "" else r.optString("label", ""),
+                if (r.isNull("sn")) "Focus" else r.optString("sn", "Focus"), if (r.isNull("sc")) "" else r.optString("sc", ""),
+                if (r.optString("mode") == "pomo") "pomo" else "stopwatch",
+                r.optString("phase", "focus"), r.optBoolean("running", false),
+                r.optLong("total", 0L), r.optLong("elapsed", 0L), r.optBoolean("over", false)
+            ))
         } catch (e: Exception) { null }
     }
 

@@ -18,17 +18,17 @@ import android.os.SystemClock
  * blocker again by themselves whenever it is not running:
  *   1. an alarm that wakes every ~5 minutes (and 1.5 s after the app is swiped away or the service is stopped), and
  *   2. a system job that runs every ~15 minutes, survives a restart of the phone, and also runs when the internet comes back.
- * Neither timer does anything when blocking is switched off or no apps are chosen.
+ * Neither timer does anything when blocking is switched off (or no apps are chosen) AND the floating timer is off.
  */
 object Watchdog {
     private const val JOB_ID = 4101
     private const val ALARM_CODE = 4102
     private const val ALARM_EVERY_MS = 5L * 60_000L
 
-    /** Make sure both timers exist (does nothing, and removes them, when blocking is not wanted). */
+    /** Make sure both timers exist (does nothing, and removes them, when neither blocking nor the floating timer is wanted). */
     fun schedule(c: Context) {
         val ctx = c.applicationContext
-        if (!Prefs.blockingWanted(ctx)) { cancel(ctx); return }
+        if (!Prefs.keepAliveWanted(ctx)) { cancel(ctx); return }
         scheduleJob(ctx)
         scheduleAlarm(ctx, ALARM_EVERY_MS)
     }
@@ -42,7 +42,7 @@ object Watchdog {
     /** One look: bring the blocker back if it is wanted, and set the next alarm. Called by the alarm and by the job. */
     fun check(c: Context) {
         val ctx = c.applicationContext
-        if (!Prefs.blockingWanted(ctx)) { cancel(ctx); return }
+        if (!Prefs.keepAliveWanted(ctx)) { cancel(ctx); return }
         scheduleAlarm(ctx, ALARM_EVERY_MS)
         BlockerService.ensure(ctx)
     }

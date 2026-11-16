@@ -12,6 +12,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
@@ -45,11 +46,15 @@ import java.util.concurrent.atomic.AtomicBoolean
  * chosen app is opened, or when the internet comes back) whether a focus session is running on any of your devices, so
  * blocking works even when the Halo page is asleep or Halo is not open at all.
  * If the phone stops this service, Watchdog (alarm + system job) starts it again by itself: no need to open Halo.
+ *
+ * It also draws the floating timer bar (MiniOverlay) over your other apps while a focus session is running or paused,
+ * on this phone or on another of your devices. That works with app blocking switched off too.
  */
 class BlockerService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private var overlay: View? = null
     private var overlayPkg: String? = null
+    private var mini: MiniOverlay? = null      // the floating timer bar (created when first needed)
 
     /** Which screens are on top right now: "package/activity" -> when it came to the front. An entry is removed only when that screen is really left. */
     private val resumed = HashMap<String, Long>()
@@ -79,6 +84,7 @@ class BlockerService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         io = Executors.newSingleThreadExecutor()
         registerScreenReceiver()
     }
@@ -103,22 +109,31 @@ class BlockerService : Service() {
 
     /** The person swiped Halo out of the recent-apps list: some phones stop the service with it. Ask the watchdog to bring it back. */
     override fun onTaskRemoved(rootIntent: Intent?) {
-        if (Prefs.blockingWanted(this) && Perms.both(this)) Watchdog.scheduleAlarm(this, 1_500L)
+        if (Prefs.serviceWanted(this)) Watchdog.scheduleAlarm(this, 1_500L)
         super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
         hideOverlay()
+        try { mini?.destroy() } catch (e: Exception) {}
+        mini = null
+        if (instance === this) instance = null
         try { screenReceiver?.let { unregisterReceiver(it) } } catch (e: Exception) {}
         screenReceiver = null
         try { netCb?.let { (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(it) } } catch (e: Exception) {}
         netCb = null
         // Stopped by the phone (not by the person switching blocking off)? Come back in a moment.
-        if (Prefs.blockingWanted(this) && Perms.both(this)) Watchdog.scheduleAlarm(this, 3_000L)
+        if (Prefs.serviceWanted(this)) Watchdog.scheduleAlarm(this, 3_000L)
         try { io?.shutdownNow() } catch (e: Exception) {}
         started = false
         super.onDestroy()
+    }
+
+    /** The screen was rotated: put the floating bar back inside the new screen. */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        try { mini?.reclamp() } catch (e: Exception) {}
     }
 
     private fun registerScreenReceiver() {
@@ -160,7 +175,16 @@ class BlockerService : Service() {
 
     /** Returns how long to wait before the next look. */
     private fun doTick(): Long {
-        if (!Prefs.blockingWanted(this)) { stopSelf(); return 4000L }
+        val blocking = Prefs.blockingWanted(this)
+        val miniWanted = Prefs.miniWanted(this)
+        if (!blocking && !miniWanted) { dropMini(); stopSelf(); return 4000L }
+        if (miniWanted) maybePoll(false)      // (also asks the server what to show on the floating timer)
+        miniSync()
+        if (!blocking) {      // only the floating timer is wanted: no app blocking at all
+            hideOverlay()
+            note(if (MiniHub.resolve(this) != null) "Halo is showing your focus timer" else "Halo is ready to show your focus timer")
+            return if (mini?.isShown() == true) 1000L else 3000L
+        }
         if (!Perms.both(this)) {
             note("Halo needs permissions to block apps. Tap to fix.")
             hideOverlay(); return 4000L
@@ -221,8 +245,9 @@ class BlockerService : Service() {
     /** Asks the server (on a background thread) whether a session is running anywhere. force = skip the usual waiting time (but never more than once per 3 s). */
     private fun maybePoll(force: Boolean) {
         val link = Prefs.link(this) ?: return
+        val wantState = Prefs.miniWanted(this)      // the floating timer also needs the session's details, a bit more often
         val now = SystemClock.elapsedRealtime()
-        val gap = if (force) 3_000L else if (screenOn) 12_000L else 60_000L
+        val gap = if (force) 3_000L else if (screenOn) (if (wantState) 8_000L else 12_000L) else 60_000L
         if (now - lastPoll < gap) return
         if (!netBusy.compareAndSet(false, true)) return
         lastPoll = now
@@ -245,12 +270,40 @@ class BlockerService : Service() {
                         val ok = Net.touch(link)
                         if (ok == false && Prefs.localSilentMs(ctx) > 90_000L) Prefs.setLocalOff(ctx)
                     }
+                    if (wantState && !cleared) {
+                        val rs = Net.state(link)
+                        if (rs != null) handler.post { MiniHub.onServer(ctx, rs) }
+                    }
                 } catch (e: Exception) {
                 } finally {
                     netBusy.set(false)
                 }
             }
         } catch (e: Exception) { netBusy.set(false) }
+    }
+
+    /** Draws, updates or removes the floating timer bar so it matches what is going on right now. Cheap: called every look and whenever something changes. */
+    fun miniSync() {
+        try {
+            val json = if (Prefs.miniWanted(this)) MiniHub.resolve(this) else null
+            MiniHub.track(this, json != null)
+            val show = json != null && screenOn && !MiniHub.haloShown && !Prefs.miniDismissed(this)
+            if (show && json != null) {
+                val m = mini ?: MiniOverlay(this).also { mini = it }
+                m.show(json)
+            } else {
+                mini?.hide(json == null)
+            }
+        } catch (e: Exception) { /* the bar must never crash the service */ }
+    }
+
+    fun miniMsg(text: String) {
+        try { mini?.msg(text) } catch (e: Exception) {}
+    }
+
+    private fun dropMini() {
+        try { mini?.destroy() } catch (e: Exception) {}
+        mini = null
     }
 
     private fun showOverlay(pkg: String) {
@@ -351,10 +404,13 @@ class BlockerService : Service() {
         private const val CHANNEL = "halo_blocker"
         private const val NOTE_ID = 1
 
+        /** The running service (if any), so the Halo page can tell it at once when the floating timer should change. */
+        @Volatile var instance: BlockerService? = null
+
         /** Call while the app is on screen, or from the boot receiver (Android refuses to start it from the background otherwise). */
         fun ensure(c: Context) {
             val ctx = c.applicationContext
-            if (Prefs.blockingWanted(ctx) && Perms.both(ctx)) {
+            if (Prefs.serviceWanted(ctx)) {
                 Watchdog.schedule(ctx)
                 try { ContextCompat.startForegroundService(ctx, Intent(ctx, BlockerService::class.java)) } catch (e: Exception) {}
             }

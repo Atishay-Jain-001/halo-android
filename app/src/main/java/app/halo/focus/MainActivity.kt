@@ -32,6 +32,7 @@ class MainActivity : Activity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        MiniHub.page = this      // the floating timer's buttons are carried out by this page
         web = WebView(this)
         web.layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         setContentView(web)
@@ -117,7 +118,26 @@ class MainActivity : Activity() {
             }
             "perms" -> startActivity(Intent(this, SetupActivity::class.java))
             "battery" -> startActivity(Intent(this, SetupActivity::class.java).putExtra("battery", true))
+            "mini" -> {
+                // The page's timer as plain data (null = no session). The floating bar draws it and keeps its own clock.
+                MiniHub.onPageSnap(this, o.optJSONObject("snap")?.toString())
+                if (resumed) BlockerService.ensure(this)
+            }
+            "minimsg" -> MiniHub.pageMsg(o.optString("text"))
+            "minishow" -> MiniHub.show(this)
+            "miniset" -> {
+                Prefs.setMiniOn(this, o.optBoolean("on", true))
+                if (resumed) BlockerService.ensure(this)
+                MiniHub.changed(this)
+                pushState()
+            }
         }
+    }
+
+    /** Used by MiniHub: hand a command to the Halo page (the bar's button presses). false = the page can't be reached right now. */
+    fun deliver(json: String): Boolean {
+        val r = reply ?: return false
+        return try { r.postMessage(json); true } catch (e: Exception) { false }
     }
 
     private fun pushState() {
@@ -130,6 +150,8 @@ class MainActivity : Activity() {
         o.put("linked", Prefs.linked(this))
         o.put("linkUid", Prefs.linkUid(this))
         o.put("linkDevice", Prefs.linkDevice(this))
+        o.put("mini", true)      // this app version can draw the floating timer bar
+        o.put("miniOn", Prefs.miniOn(this))
         post(o)
     }
 
@@ -159,13 +181,22 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         resumed = true
+        MiniHub.haloShown = true      // the big timer is right here: the floating bar steps aside
         BlockerService.ensure(this)
+        MiniHub.changed(this)
         pushState()      // permissions may have just been changed in Settings
     }
 
     override fun onPause() {
         resumed = false
+        MiniHub.haloShown = false      // left Halo: the floating bar appears (if a session is running)
+        MiniHub.changed(this)
         super.onPause()
+    }
+
+    override fun onDestroy() {
+        if (MiniHub.page === this) MiniHub.page = null
+        super.onDestroy()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {

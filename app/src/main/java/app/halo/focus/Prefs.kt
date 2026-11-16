@@ -107,7 +107,8 @@ object Prefs {
     fun clearLink(c: Context) {
         sp(c).edit().remove("link_key").remove("link_url").remove("link_anon").remove("link_device").remove("link_uid")
             .putBoolean("srv_live", false).putString("srv_dev", "").putLong("srv_ts", 0L)
-            .putBoolean("local_on", false).putLong("local_until", 0L).putBoolean("remote_on", false).apply()
+            .putBoolean("local_on", false).putLong("local_until", 0L).putBoolean("remote_on", false)
+            .remove("mini_snap").putLong("mini_snap_ts", 0L).putBoolean("mini_dismissed", false).apply()
     }
 
     /** The server's latest answer to "is a focus session running on my account?". device = which device owns it. */
@@ -133,4 +134,58 @@ object Prefs {
 
     /** Blocking is wanted at all (switch on and at least one app chosen). */
     fun blockingWanted(c: Context) = enabled(c) && blocked(c).isNotEmpty()
+
+    /* ---- the floating timer bar (drawn over other apps by MiniOverlay) ---- */
+    private const val MINI_SNAP_MAX_MS = 12L * 3_600_000L      // never trust the page's last timer picture for longer than the Halo timer's own 12 h limit
+
+    fun miniOn(c: Context) = sp(c).getBoolean("mini_on", true)
+    fun setMiniOn(c: Context, on: Boolean) = sp(c).edit().putBoolean("mini_on", on).apply()
+
+    /** The floating timer is wanted and possible: switched on, linked to the account (so it can ask the server) and allowed to draw over other apps. */
+    fun miniWanted(c: Context) = miniOn(c) && linked(c) && Perms.overlay(c)
+
+    /** Something wants the background service kept alive (the watchdog uses this): app blocking, or the floating timer. */
+    fun keepAliveWanted(c: Context) = blockingWanted(c) || (miniOn(c) && linked(c))
+
+    /** The service has a reason to run right now. */
+    fun serviceWanted(c: Context) = (blockingWanted(c) && Perms.both(c)) || miniWanted(c)
+
+    /** The timer of THIS phone's Halo page as plain data (JSON). Written on every message from the page, which doubles as its heartbeat. null = the page says there is no session. */
+    fun setMiniSnap(c: Context, json: String?) {
+        val p = sp(c)
+        val e = p.edit()
+        if (json == null) e.remove("mini_snap").putLong("mini_snap_ts", 0L)
+        else {
+            if (p.getString("mini_snap", null) != json) e.putString("mini_snap", json)
+            e.putLong("mini_snap_ts", System.currentTimeMillis())
+        }
+        e.apply()
+    }
+
+    fun miniSnap(c: Context): String? {
+        val p = sp(c)
+        val j = p.getString("mini_snap", null) ?: return null
+        if (System.currentTimeMillis() - p.getLong("mini_snap_ts", 0L) > MINI_SNAP_MAX_MS) return null
+        return j
+    }
+
+    /** How long since the Halo page last said anything about its timer. */
+    fun miniSnapAgeMs(c: Context): Long = System.currentTimeMillis() - sp(c).getLong("mini_snap_ts", 0L)
+
+    /** The person dragged the bar onto the cross: stay hidden until the next session (or until they bring it back from Halo). */
+    fun miniDismissed(c: Context) = sp(c).getBoolean("mini_dismissed", false)
+    fun setMiniDismissed(c: Context, v: Boolean) = sp(c).edit().putBoolean("mini_dismissed", v).apply()
+
+    /** Where the bar sits: its centre as a fraction of the screen (so it survives a rotation). null = never moved. */
+    fun miniPos(c: Context): FloatArray? {
+        val p = sp(c)
+        if (!p.contains("mini_fx") || !p.contains("mini_fy")) return null
+        return floatArrayOf(p.getFloat("mini_fx", 0.5f), p.getFloat("mini_fy", 0.9f))
+    }
+
+    fun setMiniPos(c: Context, fx: Float, fy: Float) = sp(c).edit().putFloat("mini_fx", fx).putFloat("mini_fy", fy).apply()
+
+    /** The accent colour of Halo's timer (from the page), used to colour a session shown from another device. */
+    fun miniAccent(c: Context): String = sp(c).getString("mini_accent", "#ff6a4d") ?: "#ff6a4d"
+    fun setMiniAccent(c: Context, hex: String) = sp(c).edit().putString("mini_accent", hex).apply()
 }
