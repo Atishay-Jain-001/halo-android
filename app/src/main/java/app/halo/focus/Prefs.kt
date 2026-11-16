@@ -10,7 +10,7 @@ import java.net.URI
  * ("is a focus session running on my account?") and it can be revoked by logging out of Halo.
  */
 object Prefs {
-    const val ORIGIN = "https://halo.atishayjain9112009.workers.dev/"
+    const val ORIGIN = "https://halo.atishayjain9112009.workers.dev"
     private const val STALE_MS = 130_000L                    // old way (page tells the app about another device): only used while the app is NOT linked
     private const val LOCAL_MAX_MS = 12L * 3_600_000L        // a session started on this phone never lasts longer than the Halo timer's own 12 h limit
     private const val SERVER_KEEP_MS = 10L * 60_000L         // can't reach the server? keep trusting the last "a session is running" answer this long (so airplane mode is no way around the block)
