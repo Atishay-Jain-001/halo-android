@@ -69,7 +69,7 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Shows a Stay focused screen over distracting apps while a study session is running" />
+                android:value="Shows a Stay focused screen over distracting apps, and a small floating focus timer, while a study session is running" />
         </service>
     </application>
 </manifest>
