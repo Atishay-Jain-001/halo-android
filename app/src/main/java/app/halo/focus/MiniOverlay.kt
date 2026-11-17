@@ -66,6 +66,8 @@ class MiniOverlay(context: Context) {
     private var ready = false
     private var failedAt = 0L
     private var loadAt = 0L      // when the bar page was last asked to load
+    private var lastErr = ""      // last problem loading the bar page (for the status line)
+    private var attachErr = ""      // last problem putting the bar on screen
     private var isOpen = false
     private var lastJson = ""
     private var anchorX = 0f      // where the bar's middle belongs (the open window grows around it, and goes back to it)
@@ -78,6 +80,12 @@ class MiniOverlay(context: Context) {
     private var overCross = false
 
     fun isShown(): Boolean = attached
+
+    /** One line: is the bar's page loaded, is its window on screen, and what went wrong if not. */
+    fun diag(): String {
+        val page = if (web == null) "not created" else if (ready) "loaded" else if (failedAt != 0L) "FAILED to load (" + lastErr + ")" else "loading"
+        return page + ", window " + (if (attached) "on screen" else "hidden") + (if (attachErr.isNotEmpty()) " (" + attachErr + ")" else "")
+    }
 
     /* ---------------- show / hide ---------------- */
 
@@ -170,10 +178,10 @@ class MiniOverlay(context: Context) {
                 return !(u.scheme == o.scheme && u.host == o.host && u.port == o.port)
             }
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
-                if (request.isForMainFrame) { ready = false; failedAt = SystemClock.elapsedRealtime() }
+                if (request.isForMainFrame) { ready = false; failedAt = SystemClock.elapsedRealtime(); lastErr = error.description?.toString() ?: "error " + error.errorCode }
             }
             override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse) {
-                if (request.isForMainFrame && errorResponse.statusCode >= 400) { ready = false; failedAt = SystemClock.elapsedRealtime() }
+                if (request.isForMainFrame && errorResponse.statusCode >= 400) { ready = false; failedAt = SystemClock.elapsedRealtime(); lastErr = "HTTP " + errorResponse.statusCode }
             }
         }
         // Only mini.html on the Halo site can talk to the app, through this one named door.
@@ -247,8 +255,9 @@ class MiniOverlay(context: Context) {
         try {
             wm.addView(r, p)
             attached = true
+            attachErr = ""
             try { web?.onResume() } catch (e: Exception) { }
-        } catch (e: Exception) { attached = false }
+        } catch (e: Exception) { attached = false; attachErr = (e.javaClass.simpleName + ": " + (e.message ?: "")).take(70) }
     }
 
     /** Where the bar's middle belongs: the saved spot, or bottom-centre just above the navigation bar. */

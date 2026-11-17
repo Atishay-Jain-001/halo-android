@@ -24,6 +24,11 @@ object MiniHub {
     private var pending: String? = null
     private var pendingAt = 0L
 
+    private var testUntil = 0L        // a short preview of the bar, even while Halo is open (SystemClock.elapsedRealtime)
+    private var previewJson = ""
+
+    fun testing(): Boolean = SystemClock.elapsedRealtime() < testUntil
+
     /** The Halo screen is in front (the bar hides, the big timer is right there). */
     @Volatile var haloShown = false
 
@@ -61,16 +66,24 @@ object MiniHub {
         if (t.isNotEmpty()) BlockerService.instance?.miniMsg(t)
     }
 
-    /** The person asked for the bar back (from Halo's own pop-out button). */
+    /** The bar was switched on (pop-out button / settings): bring it back after the cross, and preview it for a few seconds even while Halo is open. */
     fun show(c: Context) {
         Prefs.setMiniDismissed(c, false)
+        testUntil = SystemClock.elapsedRealtime() + 7_000L
+        previewJson = JSONObject().put("v", 1).put("src", "preview").put("label", "preview").put("mode", "pomo").put("phase", "focus")
+            .put("over", false).put("running", true).put("total", 1_500_000L).put("base", 612_000L).put("startTs", System.currentTimeMillis())
+            .put("pauseAt", 0).put("dMini", true).put("pc", Prefs.miniAccent(c)).toString()
+        BlockerService.ensure(c)
         changed(c)
+        page?.refreshState()
     }
 
     /** Dragged onto the cross: hide it for this session. The timer itself keeps running. */
     fun dismiss(c: Context) {
         Prefs.setMiniDismissed(c, true)
+        testUntil = 0L
         changed(c)
+        page?.refreshState()
     }
 
     /** Tell the service something changed, so it redraws now instead of at its next look. */
@@ -83,7 +96,7 @@ object MiniHub {
         val now = SystemClock.elapsedRealtime()
         if (hasSession) { noneSince = 0L; return }
         if (noneSince == 0L) noneSince = now
-        else if (now - noneSince > 5_000L && Prefs.miniDismissed(c)) Prefs.setMiniDismissed(c, false)
+        else if (now - noneSince > 5_000L && Prefs.miniDismissed(c)) { Prefs.setMiniDismissed(c, false); page?.refreshState() }
     }
 
     /* ---------------- what to draw ---------------- */
@@ -102,8 +115,8 @@ object MiniHub {
             local.put("src", "local")
             return local.toString()
         }
-        val r = remote ?: return null
-        if (now - r.at > REMOTE_KEEP_MS) return null
+        val r = remote
+        if (r == null || now - r.at > REMOTE_KEEP_MS) return if (testing()) previewJson else null
         val row = r.row
         val brk = row.mode == "pomo" && row.phase != "focus"
         val color = if (brk) "#3ddc84" else Prefs.miniAccent(c)
@@ -122,6 +135,15 @@ object MiniHub {
         o.put("dMini", true)
         o.put("pc", color)
         return o.toString()
+    }
+
+    /** Where the picture of the timer comes from right now (for the status line in Halo's settings). */
+    fun source(c: Context): String {
+        val lj = Prefs.miniSnap(c)
+        if (lj != null) return "this phone's Halo"
+        val r = remote
+        if (r != null && System.currentTimeMillis() - r.at <= REMOTE_KEEP_MS) return "another device"
+        return "none"
     }
 
     /* ---------------- a button pressed on the bar ---------------- */

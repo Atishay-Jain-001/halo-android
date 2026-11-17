@@ -287,7 +287,7 @@ class BlockerService : Service() {
         try {
             val json = if (Prefs.miniWanted(this)) MiniHub.resolve(this) else null
             MiniHub.track(this, json != null)
-            val show = json != null && screenOn && !MiniHub.haloShown && !Prefs.miniDismissed(this)
+            val show = json != null && screenOn && (MiniHub.testing() || (!MiniHub.haloShown && !Prefs.miniDismissed(this)))
             if (show && json != null) {
                 val m = mini ?: MiniOverlay(this).also { mini = it }
                 m.show(json)
@@ -296,6 +296,9 @@ class BlockerService : Service() {
             }
         } catch (e: Exception) { /* the bar must never crash the service */ }
     }
+
+    /** One line about the floating bar's page and window, for the status text in Halo's settings. */
+    fun miniDiag(): String = mini?.diag() ?: "not started yet"
 
     fun miniMsg(text: String) {
         try { mini?.msg(text) } catch (e: Exception) {}

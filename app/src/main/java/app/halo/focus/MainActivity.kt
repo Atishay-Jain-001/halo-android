@@ -126,7 +126,9 @@ class MainActivity : Activity() {
             "minimsg" -> MiniHub.pageMsg(o.optString("text"))
             "minishow" -> MiniHub.show(this)
             "miniset" -> {
-                Prefs.setMiniOn(this, o.optBoolean("on", true))
+                val on = o.optBoolean("on", true)
+                Prefs.setMiniOn(this, on)
+                if (on) MiniHub.show(this)      // switched on: bring it back and preview it for a few seconds
                 if (resumed) BlockerService.ensure(this)
                 MiniHub.changed(this)
                 pushState()
@@ -140,6 +142,9 @@ class MainActivity : Activity() {
         return try { r.postMessage(json); true } catch (e: Exception) { false }
     }
 
+    /** Used by MiniHub: tell the page the floating timer's state changed (e.g. it was hidden with the cross). */
+    fun refreshState() { pushState() }
+
     private fun pushState() {
         val o = JSONObject()
         o.put("t", "state")
@@ -152,6 +157,12 @@ class MainActivity : Activity() {
         o.put("linkDevice", Prefs.linkDevice(this))
         o.put("mini", true)      // this app version can draw the floating timer bar
         o.put("miniOn", Prefs.miniOn(this))
+        o.put("miniHidden", Prefs.miniDismissed(this))
+        o.put("miniDiag", "app build 3 · service " + (if (BlockerService.instance != null) "running" else "NOT running") +
+            " · overlay permission " + (if (Perms.overlay(this)) "yes" else "NO") +
+            " · account link " + (if (Prefs.linked(this)) "yes" else "no") +
+            " · timer seen from: " + MiniHub.source(this) +
+            " · bar page: " + (BlockerService.instance?.miniDiag() ?: "not started yet"))
         post(o)
     }
 

@@ -145,7 +145,7 @@ object Prefs {
     private fun hasMiniSnap(c: Context) = sp(c).getString("mini_snap", null) != null
 
     /** The floating timer is wanted and possible: switched on, allowed to draw over other apps, and there is something to show (this phone's own session, or the account link to ask the server about other devices). */
-    fun miniWanted(c: Context) = miniOn(c) && Perms.overlay(c) && (linked(c) || hasMiniSnap(c))
+    fun miniWanted(c: Context) = miniOn(c) && Perms.overlay(c) && (linked(c) || hasMiniSnap(c) || MiniHub.testing())
 
     /** Something wants the background service kept alive (the watchdog uses this): app blocking, or the floating timer. */
     fun keepAliveWanted(c: Context) = blockingWanted(c) || (miniOn(c) && (linked(c) || hasMiniSnap(c)))
