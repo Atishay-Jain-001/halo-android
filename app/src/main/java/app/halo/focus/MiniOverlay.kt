@@ -9,6 +9,7 @@ import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.graphics.Point
 import android.graphics.Rect
+import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -25,6 +26,7 @@ import android.view.WindowInsets
 import android.view.WindowManager
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
@@ -63,6 +65,7 @@ class MiniOverlay(context: Context) {
     private var attached = false
     private var ready = false
     private var failedAt = 0L
+    private var loadAt = 0L      // when the bar page was last asked to load
     private var isOpen = false
     private var lastJson = ""
     private var anchorX = 0f      // where the bar's middle belongs (the open window grows around it, and goes back to it)
@@ -83,8 +86,13 @@ class MiniOverlay(context: Context) {
         overSince = 0L
         if (!ensureWeb()) return
         if (!ready) {
-            // not loaded yet (or the internet was down): try again every 10 s
-            if (failedAt != 0L && SystemClock.elapsedRealtime() - failedAt > 10_000L) { failedAt = 0L; web?.loadUrl(Prefs.ORIGIN + "/mini.html") }
+            // Not loaded yet. If it failed (internet down, error page) try again after 10 s; if it just never answered, after 25 s.
+            val now = SystemClock.elapsedRealtime()
+            if ((failedAt != 0L && now - failedAt > 10_000L) || (failedAt == 0L && now - loadAt > 25_000L)) {
+                failedAt = 0L
+                loadAt = now
+                web?.loadUrl(Prefs.ORIGIN + "/mini.html")
+            }
             return
         }
         attachIfNeeded()
@@ -155,9 +163,17 @@ class MiniOverlay(context: Context) {
         w.settings.javaScriptCanOpenWindowsAutomatically = false
         w.settings.setSupportZoom(false)
         w.webViewClient = object : WebViewClient() {
-            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = true      // the bar page never navigates anywhere
+            // Pages on the Halo site may load (some hosts redirect /mini.html to /mini); anything else is refused.
+            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                val u = request.url
+                val o = Uri.parse(Prefs.ORIGIN)
+                return !(u.scheme == o.scheme && u.host == o.host && u.port == o.port)
+            }
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
                 if (request.isForMainFrame) { ready = false; failedAt = SystemClock.elapsedRealtime() }
+            }
+            override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse) {
+                if (request.isForMainFrame && errorResponse.statusCode >= 400) { ready = false; failedAt = SystemClock.elapsedRealtime() }
             }
         }
         // Only mini.html on the Halo site can talk to the app, through this one named door.
@@ -171,6 +187,7 @@ class MiniOverlay(context: Context) {
         ready = false
         failedAt = 0L
         lastJson = ""
+        loadAt = SystemClock.elapsedRealtime()
         w.loadUrl(Prefs.ORIGIN + "/mini.html")
         return true
     }
